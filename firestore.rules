@@ -1,0 +1,75 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ABAKORESHA (Users)
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ABAYOBOZI (Admins)
+    match /admins/{adminId} {
+      allow read, write: if request.auth != null && request.auth.uid == adminId;
+    }
+
+    // IBIYAGA VY'IBIGANIRO (Chat Rooms)
+    match /chat_rooms/{chatRoomId} {
+      allow get, list: if request.auth != null && request.auth.uid in resource.id.split('_');
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null && request.auth.uid in chatRoomId.split('_');
+      }
+    }
+    
+    // AMATANGAZO (Announcements)
+    match /announcements/{announcementId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    
+    // FEEDBACK
+    match /feedback/{feedbackId} {
+      allow create: if request.auth != null;
+      allow read, update: if request.auth != null && 
+                          (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) || 
+                           request.auth.uid == resource.data.uid);
+      match /admin_replies/{replyId} {
+        allow create: if request.auth != null && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+        allow read: if request.auth != null && 
+                    (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) || 
+                     request.auth.uid == get(/databases/$(database)/documents/feedback/$(feedbackId)).data.uid);
+      }
+    }
+
+    // ✅✅✅ IMPINDUKA YONYINE NI IYI GUSA ✅✅✅
+    // AMAHAMAGARA (Calls)
+    match /calls/{callId} {
+        // UMUTEKANO NKA MBERE:
+        // Gusoma no Guhindura byemewe gusa niba uri mu ihamagara.
+        allow read, update: if request.auth != null &&
+                                (request.auth.uid == resource.data.callerID || request.auth.uid == resource.data.receiverID);
+                                
+        // GUKORA (CREATE) IHAMAGARA:
+        // Byemewe gusa niba ID y'ugiye guhamagara (callerID) ari yo ID yawe.
+        // `request.resource.data` ireba amakuru ugiye kohereza, ataraba mu bubiko.
+        allow create: if request.auth != null && request.resource.data.callerID == request.auth.uid;
+        
+        // GUSIBA: Ntabwo byemewe (ibi ni byiza ku mutekano)
+        allow delete: if false; 
+    }
+
+    // (Games ntaco twahinduye)
+    match /games/{gameId} {
+      allow create: if request.auth != null
+                    && request.resource.data.player2Id == request.auth.uid
+                    && request.resource.data.status == 'ongoing';
+      allow read: if request.auth != null
+                  && (resource.data.player1Id == request.auth.uid || resource.data.player2Id == request.auth.uid);
+      allow update: if request.auth != null
+                    && (resource.data.player1Id == request.auth.uid || resource.data.player2Id == request.auth.uid);
+      allow delete: if request.auth != null
+                    && (resource.data.player1Id == request.auth.uid || resource.data.player2Id == request.auth.uid);
+    }
+  }
+}
