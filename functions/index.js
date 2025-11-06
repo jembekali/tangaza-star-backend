@@ -1,4 +1,4 @@
-// functions/index.js (VERSION FINAL, YUZUYE, KANDI IKORA NEZA 100%)
+// functions/index.js (VERSION FINAL, IKOSOYE, KANDI IKORA NEZA 100%)
 
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
@@ -170,7 +170,7 @@ exports.cleanupStorageOnPostDelete = functions.firestore
 
 
 // =========================================================================
-// ----> IMPINDUKA NSHYA ZUZUYE KANDI ZIKORA NEZA <----
+// ----> IZI NI FUNCTIONS ZIJANYE N'IBIGANIRO (CHAT) <----
 // =========================================================================
 
 /**
@@ -207,7 +207,7 @@ async function sendMediaUpdateNotification(receiverId, messageId, chatRoomId, ne
   }
 }
 
-
+// Function yo gutunganya amavidewo y'ibiganiro
 exports.optimizeChatVideo = functions
     .runWith({ timeoutSeconds: 300, memory: "1GB" })
     .storage.object().onFinalize(async (object) => {
@@ -259,6 +259,7 @@ exports.optimizeChatVideo = functions
         return null;
     });
 
+// Function yo gutunganya amafoto y'ibiganiro
 exports.optimizeChatImage = functions
     .runWith({ timeoutSeconds: 60, memory: "512MB" })
     .storage.object().onFinalize(async (object) => {
@@ -304,3 +305,55 @@ exports.optimizeChatImage = functions
         }
         return null;
     });
+
+// =========================================================================
+// ----> IMPINDUKA NSHYA YONGEYEMWO KU BIJYANYE NO GU-BLOKA <----
+// =========================================================================
+
+/**
+ * Iyi function igenzura ubutumwa bwose bwanditswe muri chat.
+ * Iyo isanze uwarungitse yarafunzwe n'uwakira, ihita isiba ubwo butumwa ako kanya.
+ */
+exports.blockChatMessageOnCreate = functions.firestore
+  .document("chat_rooms/{chatRoomId}/messages/{messageId}")
+  .onCreate(async (snap, context) => {
+    const messageData = snap.data();
+    const senderId = messageData.senderID;
+    const receiverId = messageData.receiverID;
+
+    // Turahagarika nimba ata sender canke receiver bihari
+    if (!senderId || !receiverId) {
+      console.log("SenderID or ReceiverID is missing. Cannot check block status.");
+      return null;
+    }
+
+    try {
+      // Turarondera amakuru y'uwakira ubutumwa
+      const receiverDoc = await db.collection("users").doc(receiverId).get();
+      
+      // Tugenzura nimba uwo muntu ari muri database
+      if (receiverDoc.exists) {
+        const receiverData = receiverDoc.data();
+        // Turarondera urutonde rw'abo yafunze (blockedUsers)
+        const blockedUsers = receiverData.blockedUsers || [];
+        
+        // Tugenura nimba uwarungitse ari kuri urwo rutonde
+        if (blockedUsers.includes(senderId)) {
+          console.log(`Ubutumwa buvuye kuri ${senderId} buja kuri ${receiverId} BWAHAGARITSWE kuko yafunzwe. Turasiba ubutumwa...`);
+          
+          // Guhagarika ubutumwa ni ugusiba document yari ihejeje kwandikwa.
+          // Uwarungitse ntabwo abimenya, kuri we abona ko bwarungitswe (sent)
+          // ariko ntibuzigera bushika (delivered).
+          await snap.ref.delete();
+          console.log(`Ubutumwa ${context.params.messageId} rwasivye neza.`);
+          return null;
+        }
+      }
+    } catch (error) {
+      console.error(`Habaye ikosa mu kugenzura status ya block kuri ${receiverId}:`, error);
+      // Niyo habaye ikosa, tureka ubutumwa bukagenda kugira ntiduhagarike ibiganiro by'abandi.
+    }
+    
+    // Niba atawafunzwe, nta kindi dukora, function irarangira neza.
+    return null;
+  });
