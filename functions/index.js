@@ -1,4 +1,4 @@
-// functions/index.js (VERSION FINAL, IKOSOYE, KANDI IKORA NEZA 100%)
+// functions/index.js (VERSION NSHYA YAKOMATANYIJWE KANDI IKORA 100%)
 
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
@@ -18,7 +18,135 @@ const db = admin.firestore();
 const bucket = admin.storage().bucket();
 
 // =========================================================================
-// ----> IZI NI FUNCTIONS ZAWE Z'UMWIMERERE, NTABWO ZAHINDUTSE <----
+// ----> IYI NI FUNCTION IMWE RUKUMBI IKEMURA IKIBAZO CYA MEDIA ZOSE <----
+// =========================================================================
+exports.handleMediaOptimization = functions
+  .runWith({ timeoutSeconds: 300, memory: "1GB" })
+  .storage.object().onFinalize(async (object) => {
+    const filePath = object.name;
+    const contentType = object.contentType;
+    const metadata = object.metadata || {};
+
+    // Genzura niba file atari iyatunganyijwe
+    if (path.basename(filePath).startsWith("optimized_")) {
+      return null;
+    }
+
+    // A. IGIHE ARI MEDIA Y'AMA POSTS
+    if (filePath.startsWith("posts/")) {
+      const isVideo = contentType.startsWith("video/");
+      const isImage = contentType.startsWith("image/");
+      
+      if (!isVideo && !isImage) return null;
+
+      console.log(`Media nshya ya POST yabonetse: ${filePath}. Dutangiye kuyitunganya...`);
+      const fileName = path.basename(filePath);
+      const tempFilePath = path.join(os.tmpdir(), fileName);
+      
+      const optimizedExtension = isVideo ? ".mp4" : ".webp";
+      const optimizedContentType = isVideo ? "video/mp4" : "image/webp";
+      const optimizedFileName = "optimized_" + path.parse(fileName).name + optimizedExtension;
+      const tempOptimizedPath = path.join(os.tmpdir(), optimizedFileName);
+      const optimizedFilePath = path.join(path.dirname(filePath), optimizedFileName);
+
+      try {
+        await bucket.file(filePath).download({ destination: tempFilePath });
+
+        if (isVideo) {
+          // Gutunganya Video
+          await new Promise((resolve, reject) => {
+            spawn(ffmpeg_static, ['-i', tempFilePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', tempOptimizedPath])
+            .on('close', resolve).on('error', reject);
+          });
+        } else {
+          // Gutunganya Ifoto
+          await sharp(tempFilePath).webp({ quality: 80 }).toFile(tempOptimizedPath);
+        }
+
+        await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: optimizedContentType } });
+        const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
+        
+        const postId = path.basename(fileName, path.extname(fileName));
+        const postRef = db.collection('posts').doc(postId);
+        
+        // Guhindura URL muri Firestore
+        const updateData = isVideo 
+          ? { videoUrl: newUrl, videoStoragePath: optimizedFilePath }
+          : { imageUrl: newUrl, imageStoragePath: optimizedFilePath };
+        await postRef.update(updateData);
+        
+        console.log(`Firestore yahinduwe neza kuri post ${postId}.`);
+
+      } catch (error) {
+        console.error(`Habaye ikosa mu gutunganya media ya POST (${filePath}):`, error);
+      } finally {
+        if(fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+        if(fs.existsSync(tempOptimizedPath)) fs.unlinkSync(tempOptimizedPath);
+        await bucket.file(filePath).delete();
+        console.log(`File y'umwimerere ${filePath} yasibwe.`);
+      }
+      return null;
+    }
+
+    // B. IGIHE ARI MEDIA Y'IBIGANIRO (CHAT)
+    if (filePath.startsWith("chat_media/")) {
+      const isVideo = contentType.startsWith("video/");
+      const isImage = contentType.startsWith("image/");
+      
+      if (!isVideo && !isImage) return null;
+
+      const { chatRoomID, messageID, receiverID } = metadata.customMetadata || {};
+      if (!chatRoomID || !messageID || !receiverID) {
+          console.log("Missing metadata for chat media. Aborting.");
+          return null;
+      }
+      
+      console.log(`Media nshya ya CHAT yabonetse: ${filePath}. Dutangiye kuyitunganya...`);
+      const fileName = path.basename(filePath);
+      const tempFilePath = path.join(os.tmpdir(), fileName);
+
+      const optimizedExtension = isVideo ? ".mp4" : ".webp";
+      const optimizedContentType = isVideo ? "video/mp4" : "image/webp";
+      const optimizedFileName = "optimized_" + path.parse(fileName).name + optimizedExtension;
+      const tempOptimizedPath = path.join(os.tmpdir(), optimizedFileName);
+      const optimizedFilePath = path.join(path.dirname(filePath), optimizedFileName);
+
+      try {
+          await bucket.file(filePath).download({ destination: tempFilePath });
+
+          if (isVideo) {
+            await new Promise((resolve, reject) => {
+              spawn(ffmpeg_static, ['-i', tempFilePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', tempOptimizedPath])
+              .on('close', resolve).on('error', reject);
+            });
+          } else {
+            await sharp(tempFilePath).webp({ quality: 80 }).toFile(tempOptimizedPath);
+          }
+          
+          await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: optimizedContentType, metadata } });
+          const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
+          
+          const messageRef = db.collection('chat_rooms').doc(chatRoomID).collection('messages').doc(messageID);
+          await messageRef.update({ fileUrl: newUrl, storagePath: optimizedFilePath });
+          
+          await sendMediaUpdateNotification(receiverID, messageID, chatRoomID, newUrl, optimizedFilePath);
+
+      } catch (error) {
+          console.error(`Habaye ikosa mu gutunganya media ya CHAT (${filePath}):`, error);
+      } finally {
+          if(fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+          if(fs.existsSync(tempOptimizedPath)) fs.unlinkSync(tempOptimizedPath);
+          await bucket.file(filePath).delete();
+      }
+      return null;
+    }
+
+    return null;
+  });
+
+
+// =========================================================================
+// ----> IZI NI FUNCTIONS ZAWE Z'UMWIMERERE, ZIGUMA UKO ZARI <----
 // =========================================================================
 
 // Igikorwa #1: Gusiba posts zishaje
@@ -36,6 +164,8 @@ exports.deleteOldRegularPosts = functions.pubsub
     console.log(`Deleted ${snapshot.size} old posts.`);
     return null;
   });
+
+// ... Ibindi bikorwa byawe byose bisigara uko byari biri ...
 
 // Igikorwa #2: Gusiba ubutegetsi bwa Stars zishaje (17:55)
 exports.unstarOldStars = functions.pubsub
@@ -168,182 +298,54 @@ exports.cleanupStorageOnPostDelete = functions.firestore
     return null;
   });
 
-
-// =========================================================================
-// ----> IZI NI FUNCTIONS ZIJANYE N'IBIGANIRO (CHAT) <----
-// =========================================================================
-
-/**
- * Function y'ubufasha yo kohereza ubutumwa bwa FCM (data message)
- */
 async function sendMediaUpdateNotification(receiverId, messageId, chatRoomId, newUrl, newPath) {
-  if (!receiverId) {
-    console.log("Receiver ID is missing, cannot send FCM.");
-    return;
-  }
-  try {
-    const userDoc = await db.collection("users").doc(receiverId).get();
-    if (!userDoc.exists || !userDoc.data()?.fcmToken) {
-      console.log(`FCM token for user ${receiverId} not found.`);
+    if (!receiverId) {
+      console.log("Receiver ID is missing, cannot send FCM.");
       return;
     }
-    const fcmToken = userDoc.data().fcmToken;
-    const payload = {
-      token: fcmToken,
-      data: {
-        type: "media_optimized",
-        messageId: messageId,
-        chatRoomId: chatRoomId,
-        newFileUrl: newUrl,
-        newStoragePath: newPath,
-      },
-      android: { priority: "high" },
-      apns: { headers: { "apns-priority": "10" } },
-    };
-    await admin.messaging().send(payload);
-    console.log(`Successfully sent FCM to user ${receiverId} for message ${messageId}.`);
-  } catch (error) {
-    console.error(`Failed to send FCM for message ${messageId}:`, error);
+    try {
+      const userDoc = await db.collection("users").doc(receiverId).get();
+      if (!userDoc.exists || !userDoc.data()?.fcmToken) {
+        console.log(`FCM token for user ${receiverId} not found.`);
+        return;
+      }
+      const fcmToken = userDoc.data().fcmToken;
+      const payload = {
+        token: fcmToken,
+        data: {
+          type: "media_optimized",
+          messageId: messageId,
+          chatRoomId: chatRoomId,
+          newFileUrl: newUrl,
+          newStoragePath: newPath,
+        },
+        android: { priority: "high" },
+        apns: { headers: { "apns-priority": "10" } },
+      };
+      await admin.messaging().send(payload);
+      console.log(`Successfully sent FCM to user ${receiverId} for message ${messageId}.`);
+    } catch (error) {
+      console.error(`Failed to send FCM for message ${messageId}:`, error);
+    }
   }
-}
 
-// Function yo gutunganya amavidewo y'ibiganiro
-exports.optimizeChatVideo = functions
-    .runWith({ timeoutSeconds: 300, memory: "1GB" })
-    .storage.object().onFinalize(async (object) => {
-        const filePath = object.name;
-        const contentType = object.contentType;
-        const metadata = object.metadata || {};
-
-        if (!contentType.startsWith("video/") || !filePath.startsWith("chat_media/") || path.basename(filePath).startsWith("optimized_")) {
-            return null;
-        }
-        
-        const { chatRoomID, messageID, receiverID } = metadata.customMetadata || {};
-
-        if (!chatRoomID || !messageID || !receiverID) {
-            console.log("Missing metadata for chat video. Aborting.");
-            return null;
-        }
-
-        const fileName = path.basename(filePath);
-        const tempFilePath = path.join(os.tmpdir(), fileName);
-        const optimizedFileName = "optimized_" + fileName.replace(/\.[^/.]+$/, "") + ".mp4";
-        const tempOptimizedPath = path.join(os.tmpdir(), optimizedFileName);
-        const optimizedFilePath = path.join(path.dirname(filePath), optimizedFileName);
-
-        try {
-            await bucket.file(filePath).download({ destination: tempFilePath });
-
-            await new Promise((resolve, reject) => {
-                spawn(ffmpeg_static, ['-i', tempFilePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', tempOptimizedPath])
-                .on('close', resolve).on('error', reject);
-            });
-            
-            await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: "video/mp4", metadata } });
-            
-            const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
-            
-            const messageRef = db.collection('chat_rooms').doc(chatRoomID).collection('messages').doc(messageID);
-            await messageRef.update({ fileUrl: newUrl, storagePath: optimizedFilePath });
-            
-            await sendMediaUpdateNotification(receiverID, messageID, chatRoomID, newUrl, optimizedFilePath);
-
-        } catch (error) {
-            console.error("Error optimizing video:", error);
-        } finally {
-            if(fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-            if(fs.existsSync(tempOptimizedPath)) fs.unlinkSync(tempOptimizedPath);
-            await bucket.file(filePath).delete();
-        }
-        return null;
-    });
-
-// Function yo gutunganya amafoto y'ibiganiro
-exports.optimizeChatImage = functions
-    .runWith({ timeoutSeconds: 60, memory: "512MB" })
-    .storage.object().onFinalize(async (object) => {
-        const filePath = object.name;
-        const contentType = object.contentType;
-        const metadata = object.metadata || {};
-
-        if (!contentType.startsWith("image/") || !filePath.startsWith("chat_media/") || path.basename(filePath).startsWith("optimized_")) {
-            return null;
-        }
-
-        const { chatRoomID, messageID, receiverID } = metadata.customMetadata || {};
-
-        if (!chatRoomID || !messageID || !receiverID) {
-            console.log("Missing metadata for chat image. Aborting.");
-            return null;
-        }
-
-        const fileName = path.basename(filePath);
-        const tempFilePath = path.join(os.tmpdir(), fileName);
-        const optimizedFileName = "optimized_" + path.parse(fileName).name + ".webp";
-        const tempOptimizedPath = path.join(os.tmpdir(), optimizedFileName);
-        const optimizedFilePath = path.join(path.dirname(filePath), optimizedFileName);
-
-        try {
-            await bucket.file(filePath).download({ destination: tempFilePath });
-            await sharp(tempFilePath).webp({ quality: 80 }).toFile(tempOptimizedPath);
-            await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: "image/webp", metadata } });
-            
-            const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
-
-            const messageRef = db.collection('chat_rooms').doc(chatRoomID).collection('messages').doc(messageID);
-            await messageRef.update({ fileUrl: newUrl, storagePath: optimizedFilePath });
-            
-            await sendMediaUpdateNotification(receiverID, messageID, chatRoomID, newUrl, optimizedFilePath);
-
-        } catch (error) {
-            console.error("Error optimizing image:", error);
-        } finally {
-            if(fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
-            if(fs.existsSync(tempOptimizedPath)) fs.unlinkSync(tempOptimizedPath);
-            await bucket.file(filePath).delete();
-        }
-        return null;
-    });
-
-// =========================================================================
-// ----> IMPINDUKA NSHYA YONGEYEMWO KU BIJYANYE NO GU-BLOKA <----
-// =========================================================================
-
-/**
- * Iyi function igenzura ubutumwa bwose bwanditswe muri chat.
- * Iyo isanze uwarungitse yarafunzwe n'uwakira, ihita isiba ubwo butumwa ako kanya.
- */
 exports.blockChatMessageOnCreate = functions.firestore
   .document("chat_rooms/{chatRoomId}/messages/{messageId}")
   .onCreate(async (snap, context) => {
     const messageData = snap.data();
     const senderId = messageData.senderID;
     const receiverId = messageData.receiverID;
-
-    // Turahagarika nimba ata sender canke receiver bihari
     if (!senderId || !receiverId) {
       console.log("SenderID or ReceiverID is missing. Cannot check block status.");
       return null;
     }
-
     try {
-      // Turarondera amakuru y'uwakira ubutumwa
       const receiverDoc = await db.collection("users").doc(receiverId).get();
-      
-      // Tugenzura nimba uwo muntu ari muri database
       if (receiverDoc.exists) {
         const receiverData = receiverDoc.data();
-        // Turarondera urutonde rw'abo yafunze (blockedUsers)
         const blockedUsers = receiverData.blockedUsers || [];
-        
-        // Tugenura nimba uwarungitse ari kuri urwo rutonde
         if (blockedUsers.includes(senderId)) {
           console.log(`Ubutumwa buvuye kuri ${senderId} buja kuri ${receiverId} BWAHAGARITSWE kuko yafunzwe. Turasiba ubutumwa...`);
-          
-          // Guhagarika ubutumwa ni ugusiba document yari ihejeje kwandikwa.
-          // Uwarungitse ntabwo abimenya, kuri we abona ko bwarungitswe (sent)
-          // ariko ntibuzigera bushika (delivered).
           await snap.ref.delete();
           console.log(`Ubutumwa ${context.params.messageId} rwasivye neza.`);
           return null;
@@ -351,9 +353,6 @@ exports.blockChatMessageOnCreate = functions.firestore
       }
     } catch (error) {
       console.error(`Habaye ikosa mu kugenzura status ya block kuri ${receiverId}:`, error);
-      // Niyo habaye ikosa, tureka ubutumwa bukagenda kugira ntiduhagarike ibiganiro by'abandi.
     }
-    
-    // Niba atawafunzwe, nta kindi dukora, function irarangira neza.
     return null;
   });
