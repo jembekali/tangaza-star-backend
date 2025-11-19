@@ -1,4 +1,4 @@
-// functions/index.js (VERSION Y'IGERAGEZWA - YONGEYEMWO GUSA calculateHotScore KANDI YUZUYE)
+// functions/index.js (VERSION YANYUMA KANDI YIZEYE ISHINGIYE KU YAWE YA KERA)
 
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
@@ -17,9 +17,92 @@ if (admin.apps.length === 0) {
 const db = admin.firestore();
 const bucket = admin.storage().bucket();
 
+// =========================================================================
+// ----> IGIKORWA #3: KUVANGA AMAPOSITA ("FOR YOU" FEED) - VERSION IKOSOYe <----
+// =========================================================================
+exports.generateForYouFeed = functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError('unauthenticated', 'Ugomba kuba winjiye kugira ubone amaposita.');
+  }
+  const userId = context.auth.uid;
+
+  try {
+    const hotAndNewQuery = db.collection('posts')
+      .where('isStar', '==', false)
+      .orderBy('timestamp', 'desc')
+      .limit(20); 
+
+    const recentLikesQuery = db.collection('posts')
+      .where('likedBy', 'array-contains', userId)
+      .orderBy('timestamp', 'desc')
+      .limit(10);
+      
+    const [hotAndNewSnapshot, recentLikesSnapshot] = await Promise.all([
+      hotAndNewQuery.get(),
+      recentLikesQuery.get(),
+    ]);
+
+    let personalizedPosts = [];
+    if (!recentLikesSnapshot.empty) {
+      const likedAuthors = recentLikesSnapshot.docs.map(doc => doc.data().userId).filter(id => id);
+      const uniqueAuthors = [...new Set(likedAuthors)]; 
+      
+      if (uniqueAuthors.length > 0) {
+        const authorsForQuery = uniqueAuthors.slice(0, 10);
+        const personalizedQuery = db.collection('posts')
+          .where('isStar', '==', false)
+          .where('userId', 'in', authorsForQuery)
+          .orderBy('timestamp', 'desc')
+          .limit(10);
+        const personalizedSnapshot = await personalizedQuery.get();
+        personalizedPosts = personalizedSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      }
+    }
+    
+    const hotAndNewPosts = hotAndNewSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    
+    const allPostsMap = new Map();
+    [...hotAndNewPosts, ...personalizedPosts].forEach(post => {
+      if (post.id && post.timestamp) { 
+        allPostsMap.set(post.id, post);
+      }
+    });
+
+    let combinedPosts = Array.from(allPostsMap.values());
+    
+    combinedPosts.sort((a, b) => {
+      const scoreA = a.hotScore || 0;
+      const scoreB = b.hotScore || 0;
+      if (scoreA !== scoreB) {
+        return scoreB - scoreA;
+      }
+      return b.timestamp._seconds - a.timestamp._seconds;
+    });
+    
+    const topPosts = combinedPosts.slice(0, 10);
+    for (let i = topPosts.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [topPosts[i], topPosts[j]] = [topPosts[j], topPosts[i]];
+    }
+    const finalCombinedPosts = [...topPosts, ...combinedPosts.slice(10)];
+    const finalPosts = finalCombinedPosts.slice(0, 20).map(post => {
+      return {
+        ...post,
+        timestamp: post.timestamp._seconds * 1000,
+        starExpiryTimestamp: post.starExpiryTimestamp ? post.starExpiryTimestamp._seconds * 1000 : null,
+      };
+    });
+
+    return finalPosts;
+
+  } catch (error) {
+    console.error("Habaye ikosa mu gutegura feed:", error);
+    throw new functions.https.HttpsError('internal', 'Habaye ikosa ridasanzwe.');
+  }
+});
 
 // =========================================================================
-// ----> IGIKORWA GISHASHA: GUHARURA 'HOT SCORE' NO GUHA AGASUNIKIZO <----
+// ----> IGIKORWA #1: GUHARURA 'HOT SCORE' <----
 // =========================================================================
 exports.calculateHotScore = functions.firestore
   .document("posts/{postId}")
@@ -28,21 +111,16 @@ exports.calculateHotScore = functions.firestore
       return null;
     }
     const postData = change.after.data();
-    const postId = context.params.postId;
     let effectiveLikes;
     const isNewPost = !change.before.exists;
-
     if (isNewPost) {
-      effectiveLikes = 5;
-      console.log(`Post nshasha ${postId} ihawe agasunikizo k'intangiriro ka "likes" ${effectiveLikes}.`);
+      effectiveLikes = 5; 
     } else {
       effectiveLikes = postData.likes || 0;
     }
-
     if (!postData.timestamp) {
       return null;
     }
-
     const postTimestamp = postData.timestamp.toDate();
     const now = new Date();
     const ageInMillis = now.getTime() - postTimestamp.getTime();
@@ -50,18 +128,16 @@ exports.calculateHotScore = functions.firestore
     const gravity = 1.8;
     const newHotScore = effectiveLikes / Math.pow(ageInHours + 2, gravity);
     const oldHotScore = postData.hotScore || 0;
-
     if (Math.abs(newHotScore - oldHotScore) < 0.0001) {
       return null;
     }
-
-    console.log(`Guhindura Hot Score ya post ${postId}: ${newHotScore}`);
     return change.after.ref.update({ hotScore: newHotScore });
   });
 
 // =========================================================================
-// ----> IYI NI FUNCTION IMWE RUKUMBI IKEMURA IKIBAZO CYA MEDIA ZOSE <----
+// ----> FUNCTIONS ZAWE Z'UMWIMERERE, ZIGUMA UKO ZARI <----
 // =========================================================================
+
 exports.handleMediaOptimization = functions
   .runWith({ timeoutSeconds: 300, memory: "1GB" })
   .storage.object().onFinalize(async (object) => {
@@ -77,9 +153,10 @@ exports.handleMediaOptimization = functions
       const isVideo = contentType.startsWith("video/");
       const isImage = contentType.startsWith("image/");
       if (!isVideo && !isImage) return null;
-      console.log(`Media nshya ya POST yabonetse: ${filePath}. Dutangiye kuyitunganya...`);
+      
       const fileName = path.basename(filePath);
       const tempFilePath = path.join(os.tmpdir(), fileName);
+      
       const optimizedExtension = isVideo ? ".mp4" : ".webp";
       const optimizedContentType = isVideo ? "video/mp4" : "image/webp";
       const optimizedFileName = "optimized_" + path.parse(fileName).name + optimizedExtension;
@@ -88,6 +165,7 @@ exports.handleMediaOptimization = functions
 
       try {
         await bucket.file(filePath).download({ destination: tempFilePath });
+
         if (isVideo) {
           await new Promise((resolve, reject) => {
             spawn(ffmpeg_static, ['-i', tempFilePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', tempOptimizedPath])
@@ -96,22 +174,32 @@ exports.handleMediaOptimization = functions
         } else {
           await sharp(tempFilePath).webp({ quality: 80 }).toFile(tempOptimizedPath);
         }
+
         await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: optimizedContentType } });
         const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
-        const postId = path.basename(fileName, path.extname(fileName));
+        
+        const originalName = path.parse(fileName).name;
+        const isThumbnail = originalName.includes('_thumbnail');
+        const postId = isThumbnail ? originalName.split('_thumbnail')[0] : originalName;
+        
         const postRef = db.collection('posts').doc(postId);
-        const updateData = isVideo 
-          ? { videoUrl: newUrl, videoStoragePath: optimizedFilePath }
-          : { imageUrl: newUrl, imageStoragePath: optimizedFilePath };
+        
+        let updateData;
+        if (isThumbnail) {
+          updateData = { thumbnailUrl: newUrl };
+        } else if (isVideo) {
+          updateData = { videoUrl: newUrl, videoStoragePath: optimizedFilePath };
+        } else {
+          updateData = { imageUrl: newUrl, imageStoragePath: optimizedFilePath };
+        }
         await postRef.update(updateData);
-        console.log(`Firestore yahinduwe neza kuri post ${postId}.`);
+
       } catch (error) {
         console.error(`Habaye ikosa mu gutunganya media ya POST (${filePath}):`, error);
       } finally {
         if(fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
         if(fs.existsSync(tempOptimizedPath)) fs.unlinkSync(tempOptimizedPath);
         await bucket.file(filePath).delete();
-        console.log(`File y'umwimerere ${filePath} yasibwe.`);
       }
       return null;
     }
@@ -119,22 +207,26 @@ exports.handleMediaOptimization = functions
     if (filePath.startsWith("chat_media/")) {
       const isVideo = contentType.startsWith("video/");
       const isImage = contentType.startsWith("image/");
+      
       if (!isVideo && !isImage) return null;
+
       const { chatRoomID, messageID, receiverID } = metadata.customMetadata || {};
       if (!chatRoomID || !messageID || !receiverID) {
-          console.log("Missing metadata for chat media. Aborting.");
           return null;
       }
-      console.log(`Media nshya ya CHAT yabonetse: ${filePath}. Dutangiye kuyitunganya...`);
+      
       const fileName = path.basename(filePath);
       const tempFilePath = path.join(os.tmpdir(), fileName);
+
       const optimizedExtension = isVideo ? ".mp4" : ".webp";
       const optimizedContentType = isVideo ? "video/mp4" : "image/webp";
       const optimizedFileName = "optimized_" + path.parse(fileName).name + optimizedExtension;
       const tempOptimizedPath = path.join(os.tmpdir(), optimizedFileName);
       const optimizedFilePath = path.join(path.dirname(filePath), optimizedFileName);
+
       try {
           await bucket.file(filePath).download({ destination: tempFilePath });
+
           if (isVideo) {
             await new Promise((resolve, reject) => {
               spawn(ffmpeg_static, ['-i', tempFilePath, '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', tempOptimizedPath])
@@ -143,11 +235,15 @@ exports.handleMediaOptimization = functions
           } else {
             await sharp(tempFilePath).webp({ quality: 80 }).toFile(tempOptimizedPath);
           }
+          
           await bucket.upload(tempOptimizedPath, { destination: optimizedFilePath, metadata: { contentType: optimizedContentType, metadata } });
           const [newUrl] = await bucket.file(optimizedFilePath).getSignedUrl({ action: 'read', expires: '03-09-2491' });
+          
           const messageRef = db.collection('chat_rooms').doc(chatRoomID).collection('messages').doc(messageID);
           await messageRef.update({ fileUrl: newUrl, storagePath: optimizedFilePath });
+          
           await sendMediaUpdateNotification(receiverID, messageID, chatRoomID, newUrl, optimizedFilePath);
+
       } catch (error) {
           console.error(`Habaye ikosa mu gutunganya media ya CHAT (${filePath}):`, error);
       } finally {
@@ -157,12 +253,9 @@ exports.handleMediaOptimization = functions
       }
       return null;
     }
+
     return null;
   });
-
-// =========================================================================
-// ----> IZI NI FUNCTIONS ZAWE Z'UMWIMERERE, ZIGUMA UKO ZARI <----
-// =========================================================================
 
 exports.deleteOldRegularPosts = functions.pubsub
   .schedule("every 1 hours")
@@ -175,7 +268,6 @@ exports.deleteOldRegularPosts = functions.pubsub
     const batch = db.batch();
     snapshot.docs.forEach((doc) => batch.delete(doc.ref));
     await batch.commit();
-    console.log(`Deleted ${snapshot.size} old posts.`);
     return null;
   });
 
@@ -187,7 +279,6 @@ exports.unstarOldStars = functions.pubsub
     const oldStarsQuery = db.collection("posts").where("isStar", "==", true).where("starExpiryTimestamp", "<", now);
     const snapshot = await oldStarsQuery.get();
     if (snapshot.empty) {
-      console.log("Nta Star ishaje yabonetse yo gusiba ubutegetsi.");
       return null;
     }
     const batch = db.batch();
@@ -196,7 +287,6 @@ exports.unstarOldStars = functions.pubsub
       batch.update(postRef, { isStar: false });
     });
     await batch.commit();
-    console.log(`Zasubijwe uko zari: ${snapshot.size} posts zasivye kuba Star.`);
     return null;
   });
 
@@ -209,7 +299,6 @@ exports.calculateAndAssignStars = functions.pubsub
     const postsQuery = db.collection("posts").where("timestamp", ">=", admin.firestore.Timestamp.fromDate(twentyFourHoursAgo));
     const snapshot = await postsQuery.get();
     if (snapshot.empty) {
-      console.log("Nta post nshasha yabonetse yo kuronderamwo Stars.");
       return null;
     }
     const postsWithScore = snapshot.docs.map((doc) => {
@@ -234,7 +323,6 @@ exports.calculateAndAssignStars = functions.pubsub
       batch.update(postRef, { isStar: true, starExpiryTimestamp: starExpiryTimestamp });
     });
     await batch.commit();
-    console.log(`Hatoranijwe Stars ${top5Stars.length} hakoreshejwe Hot Score.`);
     return null;
   });
 
@@ -262,8 +350,6 @@ exports.sendStarNotification = functions.firestore
         relatedPostId: postId,
         type: "star_winner",
       });
-      
-      console.log(`Ubutumwa bwa Star bwashizwe muri database kuri user: ${userId}`);
     }
     return null;
   });
@@ -284,7 +370,6 @@ exports.deleteOldStarNotifications = functions.pubsub
     const snapshot = await oldNotificationsQuery.get();
     
     if (snapshot.empty) {
-      console.log("Nta butumwa bwa Star bushashaje bubonetse bwo gusiba.");
       return null;
     }
     
@@ -294,7 +379,6 @@ exports.deleteOldStarNotifications = functions.pubsub
     });
     
     await batch.commit();
-    console.log(`Hasivye ubutumwa bwa Star bushashaje ${snapshot.size}.`);
     return null;
   });
 
@@ -306,13 +390,11 @@ exports.cleanupStorageOnPostDelete = functions.firestore
 
 async function sendMediaUpdateNotification(receiverId, messageId, chatRoomId, newUrl, newPath) {
     if (!receiverId) {
-      console.log("Receiver ID is missing, cannot send FCM.");
       return;
     }
     try {
       const userDoc = await db.collection("users").doc(receiverId).get();
       if (!userDoc.exists || !userDoc.data()?.fcmToken) {
-        console.log(`FCM token for user ${receiverId} not found.`);
         return;
       }
       const fcmToken = userDoc.data().fcmToken;
@@ -329,7 +411,6 @@ async function sendMediaUpdateNotification(receiverId, messageId, chatRoomId, ne
         apns: { headers: { "apns-priority": "10" } },
       };
       await admin.messaging().send(payload);
-      console.log(`Successfully sent FCM to user ${receiverId} for message ${messageId}.`);
     } catch (error) {
       console.error(`Failed to send FCM for message ${messageId}:`, error);
     }
@@ -342,7 +423,6 @@ exports.blockChatMessageOnCreate = functions.firestore
     const senderId = messageData.senderID;
     const receiverId = messageData.receiverID;
     if (!senderId || !receiverId) {
-      console.log("SenderID or ReceiverID is missing. Cannot check block status.");
       return null;
     }
     try {
@@ -351,9 +431,7 @@ exports.blockChatMessageOnCreate = functions.firestore
         const receiverData = receiverDoc.data();
         const blockedUsers = receiverData.blockedUsers || [];
         if (blockedUsers.includes(senderId)) {
-          console.log(`Ubutumwa buvuye kuri ${senderId} buja kuri ${receiverId} BWAHAGARITSWE kuko yafunzwe. Turasiba ubutumwa...`);
           await snap.ref.delete();
-          console.log(`Ubutumwa ${context.params.messageId} rwasivye neza.`);
           return null;
         }
       }
